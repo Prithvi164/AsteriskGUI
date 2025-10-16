@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  # PHP Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: asterisk-gui-app
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - ./:/var/www
+      - ./storage/recordings:/var/www/storage/recordings
+    networks:
+      - asterisk-network
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - DB_HOST=mysql
+      - DB_DATABASE=asterisk_gui
+      - DB_USERNAME=asterisk_user
+      - DB_PASSWORD=asterisk_password
+      - REDIS_HOST=redis
+      - ASTERISK_AMI_HOST=asterisk
+    depends_on:
+      - mysql
+      - redis
+
+  # Nginx Web Server
+  nginx:
+    image: nginx:alpine
+    container_name: asterisk-gui-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./:/var/www
+      - ./deployment/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./ssl:/etc/nginx/ssl
+    networks:
+      - asterisk-network
+    depends_on:
+      - app
+
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: asterisk-gui-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: asterisk_gui
+      MYSQL_USER: asterisk_user
+      MYSQL_PASSWORD: asterisk_password
+      MYSQL_ROOT_PASSWORD: root_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - asterisk-network
+    ports:
+      - "3306:3306"
+
+  # Redis Cache
+  redis:
+    image: redis:alpine
+    container_name: asterisk-gui-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - asterisk-network
+    ports:
+      - "6379:6379"
+
+  # Queue Worker
+  queue-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: asterisk-gui-queue-worker
+    restart: unless-stopped
+    working_dir: /var/www
+    command: php artisan queue:work --sleep=3 --tries=3 --max-time=3600
+    volumes:
+      - ./:/var/www
+    networks:
+      - asterisk-network
+    environment:
+      - APP_ENV=production
+      - DB_HOST=mysql
+      - REDIS_HOST=redis
+    depends_on:
+      - app
+      - mysql
+      - redis
+
+  # AMI Event Listener
+  ami-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: asterisk-gui-ami-listener
+    restart: unless-stopped
+    working_dir: /var/www
+    command: php artisan ami:listen
+    volumes:
+      - ./:/var/www
+    networks:
+      - asterisk-network
+    environment:
+      - APP_ENV=production
+      - DB_HOST=mysql
+      - REDIS_HOST=redis
+      - ASTERISK_AMI_HOST=asterisk
+    depends_on:
+      - app
+      - mysql
+      - redis
+
+  # Asterisk PBX (Optional - if you want Asterisk in Docker too)
+  asterisk:
+    image: andrius/asterisk:18
+    container_name: asterisk-pbx
+    restart: unless-stopped
+    volumes:
+      - ./asterisk-config:/etc/asterisk
+      - asterisk-recordings:/var/spool/asterisk/monitor
+    networks:
+      - asterisk-network
+    ports:
+      - "5060:5060/udp"  # SIP
+      - "5038:5038"      # AMI
+      - "8088:8088"      # ARI
+      - "10000-10099:10000-10099/udp"  # RTP
+    environment:
+      - ASTERISK_UID=1000
+      - ASTERISK_GID=1000
+
+networks:
+  asterisk-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+    driver: local
+  redis-data:
+    driver: local
+  asterisk-recordings:
+    driver: local
+
